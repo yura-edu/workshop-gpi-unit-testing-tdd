@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "1.0",
+  "templateSlug": "gpi-unit-testing-tdd",
+  "evaluationBlocks": [
+    {
+      "blockId": "auto",
+      "evaluationType": "automated_pipeline",
+      "metrics": [
+        {
+          "metricKey": "test_coverage",
+          "worker": "MetricsWorker",
+          "weight": 35,
+          "threshold": 0.85,
+          "config": {
+            "tool": "jest",
+            "coverageTypes": ["lines", "branches"],
+            "minCoverage": 0.85,
+            "targetFiles": ["src/**/*.ts"]
+          }
+        },
+        {
+          "metricKey": "test_pass_rate",
+          "worker": "MetricsWorker",
+          "weight": 25,
+          "threshold": 1.0,
+          "config": {
+            "tool": "jest",
+            "requireAll": true
+          }
+        },
+        {
+          "metricKey": "cyclomatic_complexity",
+          "worker": "MetricsWorker",
+          "weight": 15,
+          "threshold": 8,
+          "config": {
+            "tool": "eslint-complexity",
+            "maxAllowed": 8,
+            "targetFiles": ["src/**/*.ts"]
+          }
+        },
+        {
+          "metricKey": "commit_message_quality",
+          "worker": "CommitAnalyzer",
+          "weight": 15,
+          "threshold": 0.7,
+          "config": {
+            "pattern": "^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)(\\(.+\\))?: .{1,72}$",
+            "minCommits": 6
+          }
+        },
+        {
+          "metricKey": "lint_violations",
+          "worker": "MetricsWorker",
+          "weight": 10,
+          "threshold": 0,
+          "config": {
+            "tool": "eslint",
+            "targetFiles": ["src/**/*.ts", "tests/**/*.ts"]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,212 @@
+name: Grader
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      # ── Métrica: test_pass_rate + test_coverage ────────────────────────────
+      - name: Run tests with coverage
+        id: run_tests
+        run: |
+          set +e
+          npx jest --coverage --json --outputFile=jest-results.json 2>&1
+          TEST_EXIT=$?
+          set -e
+
+          if [ ! -f "jest-results.json" ]; then
+            echo "pass_score=0.0" >> "$GITHUB_OUTPUT"
+            echo "pass_passed=false" >> "$GITHUB_OUTPUT"
+            echo "coverage_score=0.0" >> "$GITHUB_OUTPUT"
+            echo "coverage_passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ jest-results.json not generated"
+            exit 0
+          fi
+
+          TOTAL=$(node -e "try{const r=require('./jest-results.json');console.log(r.numTotalTests||0)}catch(e){console.log(0)}")
+          PASSED=$(node -e "try{const r=require('./jest-results.json');console.log(r.numPassedTests||0)}catch(e){console.log(0)}")
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "pass_score=0.0" >> "$GITHUB_OUTPUT"
+            echo "pass_passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ No tests found — write tests in tests/financial-calculator.test.ts"
+          elif [ "$TEST_EXIT" -eq 0 ]; then
+            echo "pass_score=1.0" >> "$GITHUB_OUTPUT"
+            echo "pass_passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ All $TOTAL tests pass"
+          else
+            RATE=$(node -e "console.log(($PASSED/$TOTAL).toFixed(3))")
+            echo "pass_score=$RATE" >> "$GITHUB_OUTPUT"
+            echo "pass_passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ $PASSED/$TOTAL tests pass"
+          fi
+
+          if [ -f "coverage/coverage-summary.json" ]; then
+            LINES=$(node -e "try{const c=require('./coverage/coverage-summary.json');console.log(c.total.lines.pct)}catch(e){console.log(0)}")
+            BRANCHES=$(node -e "try{const c=require('./coverage/coverage-summary.json');console.log(c.total.branches.pct)}catch(e){console.log(0)}")
+            MIN=$(node -e "console.log(Math.min($LINES,$BRANCHES))")
+            SCORE=$(node -e "console.log(($MIN/100).toFixed(3))")
+
+            if node -e "process.exit($MIN>=85?0:1)" 2>/dev/null; then
+              echo "coverage_score=$SCORE" >> "$GITHUB_OUTPUT"
+              echo "coverage_passed=true" >> "$GITHUB_OUTPUT"
+              echo "✅ Coverage: lines=$LINES% branches=$BRANCHES%"
+            else
+              echo "coverage_score=$SCORE" >> "$GITHUB_OUTPUT"
+              echo "coverage_passed=false" >> "$GITHUB_OUTPUT"
+              echo "❌ Coverage: lines=$LINES% branches=$BRANCHES% (need ≥ 85% on both)"
+            fi
+          else
+            echo "coverage_score=0.0" >> "$GITHUB_OUTPUT"
+            echo "coverage_passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ Coverage report not found (run with --coverage)"
+          fi
+
+      # ── Métrica: cyclomatic_complexity ─────────────────────────────────────
+      - name: Check cyclomatic complexity
+        id: cc_check
+        run: |
+          set +e
+          npx eslint src/ --rule '{"complexity": ["error", 8]}' \
+            --format json --output-file eslint-cc.json 2>/dev/null
+          CC_EXIT=$?
+          set -e
+
+          if [ "$CC_EXIT" -eq 0 ]; then
+            echo "score=1.0" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ All functions have CC ≤ 8"
+          else
+            VIOLATIONS=$(node -e "try{const r=require('./eslint-cc.json');console.log(r.reduce((s,f)=>s+f.errorCount,0))}catch(e){console.log(1)}")
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ $VIOLATIONS function(s) exceed CC = 8"
+          fi
+
+      # ── Métrica: commit_message_quality ────────────────────────────────────
+      - name: Check commit message quality
+        id: commit_quality
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+            COMMITS=$(git log --format="%s" "$BASE..$HEAD")
+          else
+            COMMITS=$(git log --format="%s" origin/main..HEAD 2>/dev/null || git log --format="%s" HEAD~10..HEAD)
+          fi
+
+          TOTAL=$(echo "$COMMITS" | grep -c . || true)
+
+          if [ "$TOTAL" -lt 6 ]; then
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ Only $TOTAL commits in PR (need ≥ 6)"
+            exit 0
+          fi
+
+          PATTERN='^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)(\(.+\))?: .{1,72}$'
+          VALID=$(echo "$COMMITS" | grep -cE "$PATTERN" || true)
+          RATE=$(node -e "console.log(($VALID/$TOTAL).toFixed(3))")
+
+          if node -e "process.exit($VALID/$TOTAL>=0.7?0:1)" 2>/dev/null; then
+            echo "score=$RATE" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ $VALID/$TOTAL commits follow Conventional Commits"
+          else
+            echo "score=$RATE" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ $VALID/$TOTAL commits follow Conventional Commits (need ≥ 70%)"
+          fi
+
+      # ── Métrica: lint_violations ───────────────────────────────────────────
+      - name: Check lint violations
+        id: lint_check
+        run: |
+          set +e
+          npx eslint 'src/**/*.ts' 'tests/**/*.ts' \
+            --format json --output-file eslint-output.json 2>/dev/null
+          LINT_EXIT=$?
+          set -e
+
+          if [ "$LINT_EXIT" -eq 0 ]; then
+            echo "score=1.0" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ No lint errors"
+          else
+            ERRORS=$(node -e "try{const r=require('./eslint-output.json');console.log(r.reduce((s,f)=>s+f.errorCount,0))}catch(e){console.log(1)}")
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ $ERRORS lint error(s) found"
+          fi
+
+      # ── Reporte final ──────────────────────────────────────────────────────
+      - name: Build grader report
+        run: |
+          cat > grader-report.json << EOF
+          {
+            "schemaVersion": "1.0",
+            "templateSlug": "gpi-unit-testing-tdd",
+            "runId": "${{ github.run_id }}",
+            "sha": "${{ github.sha }}",
+            "metrics": [
+              {
+                "metricKey": "test_coverage",
+                "score": ${{ steps.run_tests.outputs.coverage_score }},
+                "passed": ${{ steps.run_tests.outputs.coverage_passed }},
+                "unavailable": false
+              },
+              {
+                "metricKey": "test_pass_rate",
+                "score": ${{ steps.run_tests.outputs.pass_score }},
+                "passed": ${{ steps.run_tests.outputs.pass_passed }},
+                "unavailable": false
+              },
+              {
+                "metricKey": "cyclomatic_complexity",
+                "score": ${{ steps.cc_check.outputs.score }},
+                "passed": ${{ steps.cc_check.outputs.passed }},
+                "unavailable": false
+              },
+              {
+                "metricKey": "commit_message_quality",
+                "score": ${{ steps.commit_quality.outputs.score }},
+                "passed": ${{ steps.commit_quality.outputs.passed }},
+                "unavailable": false
+              },
+              {
+                "metricKey": "lint_violations",
+                "score": ${{ steps.lint_check.outputs.score }},
+                "passed": ${{ steps.lint_check.outputs.passed }},
+                "unavailable": false
+              }
+            ]
+          }
+          EOF
+          cat grader-report.json
+
+      - name: Upload grader report
+        uses: actions/upload-artifact@v4
+        with:
+          name: grader-report
+          path: grader-report.json
